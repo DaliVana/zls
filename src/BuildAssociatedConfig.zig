@@ -1,4 +1,5 @@
-//! Configuration options related to a specific `BuildFile`.
+//! Type definition for the per-project `zls.build.json` configuration file.
+
 const std = @import("std");
 
 pub const BuildOption = struct {
