@@ -82,7 +82,7 @@ const Config = struct {
 };
 
 const Schema = struct {
-    @"$schema": []const u8 = "http://json-schema.org/draft-04/schema",
+    @"$schema": []const u8 = "https://json-schema.org/draft-07/schema",
     title: []const u8 = "ZLS Config",
     description: []const u8 = "Configuration file for ZLS",
     type: []const u8 = "object",
@@ -167,7 +167,7 @@ fn generateConfigFile(
     const source_unformatted = try aw.toOwnedSliceSentinel(0);
     defer allocator.free(source_unformatted);
 
-    var tree: std.zig.Ast = try .parse(allocator, source_unformatted, .zig);
+    var tree: std.zig.Ast = try .parse(allocator, source_unformatted, .{});
     defer tree.deinit(allocator);
     std.debug.assert(tree.errors.len == 0);
 

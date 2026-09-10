@@ -2,10 +2,8 @@
 //! - [`textDocument/declaration`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_declaration)
 //! - [`textDocument/definition`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_definition)
 //! - [`textDocument/typeDefinition`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_typeDefinition)
-//! - [`textDocument/implementation`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_implementation) (same behaviour as `textDocument/definition`)
 
 const std = @import("std");
-const log = std.log.scoped(.goto);
 
 const Server = @import("../Server.zig");
 const lsp = @import("lsp");
@@ -17,7 +15,29 @@ const tracy = @import("tracy");
 const Analyser = @import("../analysis.zig");
 const DocumentStore = @import("../DocumentStore.zig");
 
-pub const GotoKind = enum {
+pub const Error = Analyser.Error || error{InvalidParams};
+
+pub fn @"textDocument/definition"(server: *Server, arena: std.mem.Allocator, request: types.Definition.Params) Error!?types.Definition.Result {
+    return try gotoHandler(server, arena, .definition, request);
+}
+pub fn @"textDocument/declaration"(server: *Server, arena: std.mem.Allocator, request: types.declaration.Params) Error!?types.Definition.Result {
+    return try gotoHandler(server, arena, .declaration, .{
+        .textDocument = request.textDocument,
+        .position = request.position,
+        .workDoneToken = request.workDoneToken,
+        .partialResultToken = request.partialResultToken,
+    });
+}
+pub fn @"textDocument/typeDefinition"(server: *Server, arena: std.mem.Allocator, request: types.type_definition.Params) Error!?types.Definition.Result {
+    return try gotoHandler(server, arena, .type_definition, .{
+        .textDocument = request.textDocument,
+        .position = request.position,
+        .workDoneToken = request.workDoneToken,
+        .partialResultToken = request.partialResultToken,
+    });
+}
+
+const GotoKind = enum {
     declaration,
     definition,
     type_definition,
@@ -33,9 +53,9 @@ fn gotoDefinitionSymbol(
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
-    const token_handle = switch (kind) {
-        .declaration => try decl_handle.definitionToken(analyser, false),
-        .definition => try decl_handle.definitionToken(analyser, true),
+    const token_handle: Analyser.TokenWithHandle = switch (kind) {
+        .declaration => .{ .token = decl_handle.nameToken(), .handle = decl_handle.handle },
+        .definition => try decl_handle.definitionToken(analyser),
         .type_definition => blk: {
             if (try decl_handle.resolveType(analyser)) |ty| {
                 var resolved_ty = ty;
@@ -258,12 +278,12 @@ fn gotoDefinitionString(
     }
 }
 
-pub fn gotoHandler(
+fn gotoHandler(
     server: *Server,
     arena: std.mem.Allocator,
     kind: GotoKind,
     request: types.Definition.Params,
-) Server.Error!?types.Definition.Result {
+) Error!?types.Definition.Result {
     const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidParams,

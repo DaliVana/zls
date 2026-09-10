@@ -7,7 +7,27 @@ const types = @import("lsp").types;
 const offsets = @import("../offsets.zig");
 const ast = @import("../ast.zig");
 const analysis = @import("../analysis.zig");
+const Server = @import("../Server.zig");
+const Uri = @import("../Uri.zig");
 const tracy = @import("tracy");
+
+pub const Error = error{ OutOfMemory, Canceled, InvalidParams };
+
+pub fn @"textDocument/documentSymbol"(
+    server: *Server,
+    arena: std.mem.Allocator,
+    request: types.DocumentSymbol.Params,
+) Error!?types.DocumentSymbol.Result {
+    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidParams,
+    };
+    const handle = server.document_store.getHandle(document_uri) orelse return null;
+    if (handle.tree.mode == .zon) return null;
+    return .{
+        .document_symbols = try getDocumentSymbols(arena, &handle.tree, server.offset_encoding),
+    };
+}
 
 const Symbol = struct {
     name_token: Ast.TokenIndex,
@@ -69,8 +89,8 @@ pub fn getDocumentSymbols(
             },
         };
 
-        try stack.append(arena, stack.getLast().?);
-        const stack_entry: *StackEntry = &stack.items[stack.items.len - 1];
+        try stack.append(arena, stack.last().?);
+        const stack_entry = stack.lastPtr().?;
 
         const symbol: Symbol = switch (tree.nodeTag(node)) {
             .global_var_decl,
