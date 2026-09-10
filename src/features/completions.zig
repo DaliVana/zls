@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const Ast = std.zig.Ast;
-const log = std.log.scoped(.completions);
 
 const Server = @import("../Server.zig");
 const DocumentStore = @import("../DocumentStore.zig");
@@ -17,6 +16,8 @@ const analyser_completions = @import("../analyser/completions.zig");
 
 const version_data = @import("version_data");
 const snippets = @import("../snippets.zig");
+
+pub const Error = Analyser.Error || error{InvalidParams};
 
 const Builder = struct {
     server: *Server,
@@ -1033,18 +1034,24 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
     }
 }
 
-pub fn completionAtIndex(
-    server: *Server,
-    analyser: *Analyser,
-    arena: std.mem.Allocator,
-    handle: *DocumentStore.Handle,
-    source_index: usize,
-) Analyser.Error!?types.completion.List {
+pub fn @"textDocument/completion"(server: *Server, arena: std.mem.Allocator, request: types.completion.Params) Error!?types.completion.Result {
+    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidParams,
+    };
+    const handle = server.document_store.getHandle(document_uri) orelse return null;
+    if (handle.tree.mode == .zon) return null;
+
+    const source_index = offsets.positionToIndex(handle.tree.source, request.position, server.offset_encoding);
+
+    var analyser = server.initAnalyser(arena, handle);
+    defer analyser.deinit();
+
     std.debug.assert(source_index <= handle.tree.source.len);
 
     var builder: Builder = .{
         .server = server,
-        .analyser = analyser,
+        .analyser = &analyser,
         .arena = arena,
         .orig_handle = handle,
         .source_index = source_index,
@@ -1057,7 +1064,7 @@ pub fn completionAtIndex(
 
     if (line_until_index.len == 0 or std.zig.isValidId(line_until_index)) {
         try populateSnippedCompletions(&builder, .top_level);
-        return .{ .isIncomplete = false, .items = builder.completions.items() };
+        return .{ .completion_list = .{ .isIncomplete = false, .items = builder.completions.items() } };
     }
 
     const pos_context = try Analyser.getPositionContext(arena, &handle.tree, source_index, false);
@@ -1107,7 +1114,7 @@ pub fn completionAtIndex(
         }
     }
 
-    return .{ .isIncomplete = false, .items = completions };
+    return .{ .completion_list = .{ .isIncomplete = false, .items = completions } };
 }
 
 // <--------------------------------------------------------------------------->
@@ -1490,7 +1497,7 @@ fn collectContainerFields(
     const scope_decls = document_scope.getScopeDeclarationsConst(scope_handle.scope);
 
     for (scope_decls) |decl_index| {
-        const decl = document_scope.declarations.get(@intFromEnum(decl_index));
+        const decl = document_scope.declarations.get(@backingInt(decl_index));
         if (decl != .ast_node) continue;
         const decl_handle: Analyser.DeclWithHandle = .{ .decl = decl, .handle = scope_handle.handle, .container_type = container };
         const maybe_resolved_ty = type_maybe orelse try decl_handle.resolveType(builder.analyser);
