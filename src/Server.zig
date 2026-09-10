@@ -20,23 +20,17 @@ const diff = @import("diff.zig");
 const Uri = @import("Uri.zig");
 const InternPool = @import("analyser/analyser.zig").InternPool;
 const DiagnosticsCollection = @import("DiagnosticsCollection.zig");
-const build_runner_shared = @import("build_runner/shared.zig");
 
-const signature_help = @import("features/signature_help.zig");
-const references = @import("features/references.zig");
 const semantic_tokens = @import("features/semantic_tokens.zig");
-const inlay_hints = @import("features/inlay_hints.zig");
 const code_actions = @import("features/code_actions.zig");
-const folding_range = @import("features/folding_range.zig");
-const document_symbol = @import("features/document_symbol.zig");
-const completions = @import("features/completions.zig");
-const goto = @import("features/goto.zig");
-const hover_handler = @import("features/hover.zig");
-const selection_range = @import("features/selection_range.zig");
 const diagnostics_gen = @import("features/diagnostics.zig");
 
-const BuildOnSave = diagnostics_gen.BuildOnSave;
-const BuildOnSaveSupport = build_runner_shared.BuildOnSaveSupport;
+const BuildOnSave = @compileError("https://github.com/zigtools/zls/issues/3208");
+const BuildOnSaveSupport = struct {
+    pub inline fn isSupportedComptime() bool {
+        return false;
+    }
+};
 
 const log = std.log.scoped(.server);
 
@@ -45,13 +39,13 @@ io: std.Io,
 allocator: std.mem.Allocator,
 config_manager: *configuration.Manager,
 document_store: DocumentStore,
-transport: ?*lsp.Transport = null,
+transport: ?*lsp.Transport,
 offset_encoding: offsets.Encoding = .@"utf-16",
 status: Status = .uninitialized,
 
 // private fields
 wait_group: std.Io.Group = .init,
-ip: InternPool = undefined,
+ip: InternPool,
 /// Stores messages that should be displayed with `window/showMessage` once the server has been initialized.
 pending_show_messages: std.ArrayList(types.window.ShowMessageParams) = .empty,
 client_capabilities: ClientCapabilities = .{},
@@ -552,7 +546,6 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
             .declarationProvider = .{ .bool = true },
             .definitionProvider = .{ .bool = true },
             .typeDefinitionProvider = .{ .bool = true },
-            .implementationProvider = .{ .bool = false },
             .referencesProvider = .{ .bool = true },
             .documentSymbolProvider = .{ .bool = true },
             .colorProvider = .{ .bool = false },
@@ -825,7 +818,6 @@ const Workspace = struct {
 
         const zig_exe_path = config.zig_exe_path orelse return;
         const zig_lib_path = config.zig_lib_path orelse return;
-        const build_runner_path = config.build_runner_path orelse return;
 
         const workspace_path = workspace.uri.toFsPath(args.server.allocator) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -842,7 +834,6 @@ const Workspace = struct {
             .check_step_only = config.enable_build_on_save == null,
             .zig_exe_path = zig_exe_path,
             .zig_lib_path = zig_lib_path,
-            .build_runner_path = build_runner_path,
             .collection = &args.server.diagnostics_collection,
         }) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
@@ -983,18 +974,17 @@ pub fn resolveConfiguration(server: *Server) error{ Canceled, OutOfMemory }!void
         server.showMessage(.Error, "{s}", .{msg});
     }
 
-    inline for (std.meta.fields(Config)) |field| {
-        if (@field(result.did_change, field.name)) {
+    inline for (comptime std.meta.fieldNames(Config)) |field_name| {
+        if (@field(result.did_change, field_name)) {
             var runtime_known_field_name: []const u8 = ""; // avoid unnecessary function instantiations of `std.Io.Writer.print`
-            runtime_known_field_name = field.name;
-            const new_value = @field(server.config_manager.config, field.name);
+            runtime_known_field_name = field_name;
+            const new_value = @field(server.config_manager.config, field_name);
             log.info("Set config option '{s}' to {f}", .{ runtime_known_field_name, std.json.fmt(new_value, .{}) });
         }
     }
 
     const new_zig_exe_path: bool = result.did_change.zig_exe_path;
     const new_zig_lib_path: bool = result.did_change.zig_lib_path;
-    const new_build_runner_path: bool = result.did_change.build_runner_path;
     const new_enable_build_on_save: bool = result.did_change.enable_build_on_save;
     const new_build_on_save_args: bool = result.did_change.build_on_save_args;
     const new_force_autofix: bool = result.did_change.force_autofix;
@@ -1011,7 +1001,6 @@ pub fn resolveConfiguration(server: *Server) error{ Canceled, OutOfMemory }!void
         const should_restart =
             new_zig_exe_path or
             new_zig_lib_path or
-            new_build_runner_path or
             new_enable_build_on_save or
             new_build_on_save_args;
 
@@ -1024,7 +1013,7 @@ pub fn resolveConfiguration(server: *Server) error{ Canceled, OutOfMemory }!void
     }
 
     if (DocumentStore.supports_build_system) {
-        if (new_zig_exe_path or new_zig_lib_path or new_build_runner_path) {
+        if (new_zig_exe_path or new_zig_lib_path) {
             for (server.document_store.build_files.keys()) |build_file_uri| {
                 server.document_store.invalidateBuildFile(build_file_uri);
             }
@@ -1061,12 +1050,11 @@ pub fn resolveConfiguration(server: *Server) error{ Canceled, OutOfMemory }!void
     check: {
         if (server.status != .initialized) break :check;
 
-        switch (server.config_manager.build_runner_supported) {
-            .yes, .no_dont_error => break :check,
-            .no => {},
-        }
+        const zig_exe = server.config_manager.zig_exe orelse break :check;
 
-        const zig_version = server.config_manager.zig_exe.?.version;
+        if (zig_exe.supported) break :check;
+
+        const zig_version = zig_exe.version;
         const zls_version = build_options.version;
 
         const zig_version_is_tagged = zig_version.pre == null;
@@ -1101,8 +1089,6 @@ pub fn resolveConfiguration(server: *Server) error{ Canceled, OutOfMemory }!void
             log.warn("'enable_build_on_save' is ignored because Zig could not be found", .{});
         } else if (!server.client_capabilities.supports_publish_diagnostics) {
             log.warn("'enable_build_on_save' is ignored because it is not supported by {s}", .{server.client_capabilities.client_name orelse "your editor"});
-        } else if (server.status == .initialized and server.config_manager.build_runner_supported == .no and server.config_manager.config.build_runner_path == null) {
-            log.warn("'enable_build_on_save' is ignored because no build runner is available", .{});
         } else if (server.status == .initialized and server.config_manager.zig_exe != null) {
             switch (BuildOnSaveSupport.isSupportedRuntime(server.config_manager.zig_exe.?.version)) {
                 .supported => {},
@@ -1132,7 +1118,6 @@ fn createDocumentStoreConfig(config_manager: *const configuration.Manager) Docum
         .environ_map = config_manager.environ_map,
         .zig_exe_path = config_manager.config.zig_exe_path,
         .zig_lib_dir = config_manager.zig_lib_dir,
-        .build_runner_path = config_manager.config.build_runner_path,
         .builtin_path = config_manager.config.builtin_path,
         .global_cache_dir = config_manager.global_cache_dir,
         .wasi_preopens = config_manager.wasi_preopens,
@@ -1254,188 +1239,6 @@ fn willSaveWaitUntilHandler(server: *Server, arena: std.mem.Allocator, request: 
     return try text_edits.toOwnedSlice(arena);
 }
 
-fn semanticTokensFullHandler(server: *Server, arena: std.mem.Allocator, request: types.semantic_tokens.Params) Error!?types.semantic_tokens.Result {
-    if (server.config_manager.config.semantic_tokens == .none) return null;
-
-    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidParams,
-    };
-    const handle = server.document_store.getHandle(document_uri) orelse return null;
-
-    // Workaround: The Ast on .zon files is unusable when an error occured on the root expr
-    if (handle.tree.mode == .zon and handle.tree.errors.len > 0) return null;
-
-    var analyser = server.initAnalyser(arena, handle);
-    defer analyser.deinit();
-    // semantic tokens can be quite expensive to compute on large files
-    // and disabling callsite references can help with bringing the cost down.
-    analyser.collect_callsite_references = false;
-
-    return try semantic_tokens.writeSemanticTokens(
-        arena,
-        &analyser,
-        handle,
-        null,
-        server.offset_encoding,
-        server.config_manager.config.semantic_tokens == .partial,
-        server.client_capabilities.supports_semantic_tokens_overlapping,
-    );
-}
-
-fn semanticTokensRangeHandler(server: *Server, arena: std.mem.Allocator, request: types.semantic_tokens.Params.Range) Error!?types.semantic_tokens.Result {
-    if (server.config_manager.config.semantic_tokens == .none) return null;
-
-    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidParams,
-    };
-    const handle = server.document_store.getHandle(document_uri) orelse return null;
-
-    // Workaround: The Ast on .zon files is unusable when an error occured on the root expr
-    if (handle.tree.mode == .zon and handle.tree.errors.len > 0) return null;
-
-    const loc = offsets.rangeToLoc(handle.tree.source, request.range, server.offset_encoding);
-
-    var analyser = server.initAnalyser(arena, handle);
-    defer analyser.deinit();
-    // semantic tokens can be quite expensive to compute on large files
-    // and disabling callsite references can help with bringing the cost down.
-    analyser.collect_callsite_references = false;
-
-    return try semantic_tokens.writeSemanticTokens(
-        arena,
-        &analyser,
-        handle,
-        loc,
-        server.offset_encoding,
-        server.config_manager.config.semantic_tokens == .partial,
-        server.client_capabilities.supports_semantic_tokens_overlapping,
-    );
-}
-
-fn completionHandler(server: *Server, arena: std.mem.Allocator, request: types.completion.Params) Error!?types.completion.Result {
-    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidParams,
-    };
-    const handle = server.document_store.getHandle(document_uri) orelse return null;
-    if (handle.tree.mode == .zon) return null;
-
-    const source_index = offsets.positionToIndex(handle.tree.source, request.position, server.offset_encoding);
-
-    var analyser = server.initAnalyser(arena, handle);
-    defer analyser.deinit();
-
-    return .{
-        .completion_list = try completions.completionAtIndex(server, &analyser, arena, handle, source_index) orelse return null,
-    };
-}
-
-fn signatureHelpHandler(server: *Server, arena: std.mem.Allocator, request: types.SignatureHelp.Params) Error!?types.SignatureHelp {
-    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidParams,
-    };
-    const handle = server.document_store.getHandle(document_uri) orelse return null;
-    if (handle.tree.mode == .zon) return null;
-
-    const source_index = offsets.positionToIndex(handle.tree.source, request.position, server.offset_encoding);
-
-    const markup_kind: types.MarkupKind = if (server.client_capabilities.signature_help_supports_md) .markdown else .plaintext;
-
-    var analyser = server.initAnalyser(arena, handle);
-    defer analyser.deinit();
-
-    const signature_info = (try signature_help.getSignatureInfo(
-        &analyser,
-        arena,
-        handle,
-        source_index,
-        markup_kind,
-    )) orelse return null;
-
-    var signatures = try arena.alloc(types.SignatureHelp.Signature, 1);
-    signatures[0] = signature_info;
-
-    return .{
-        .signatures = signatures,
-        .activeSignature = 0,
-        .activeParameter = signature_info.activeParameter,
-    };
-}
-
-fn gotoDefinitionHandler(
-    server: *Server,
-    arena: std.mem.Allocator,
-    request: types.Definition.Params,
-) Error!?types.Definition.Result {
-    return goto.gotoHandler(server, arena, .definition, request);
-}
-
-fn gotoTypeDefinitionHandler(server: *Server, arena: std.mem.Allocator, request: types.type_definition.Params) Error!?types.Definition.Result {
-    return try goto.gotoHandler(server, arena, .type_definition, .{
-        .textDocument = request.textDocument,
-        .position = request.position,
-        .workDoneToken = request.workDoneToken,
-        .partialResultToken = request.partialResultToken,
-    });
-}
-
-fn gotoImplementationHandler(server: *Server, arena: std.mem.Allocator, request: types.implementation.Params) Error!?types.Definition.Result {
-    return try goto.gotoHandler(server, arena, .definition, .{
-        .textDocument = request.textDocument,
-        .position = request.position,
-        .workDoneToken = request.workDoneToken,
-        .partialResultToken = request.partialResultToken,
-    });
-}
-
-fn gotoDeclarationHandler(server: *Server, arena: std.mem.Allocator, request: types.declaration.Params) Error!?types.Definition.Result {
-    return try goto.gotoHandler(server, arena, .declaration, .{
-        .textDocument = request.textDocument,
-        .position = request.position,
-        .workDoneToken = request.workDoneToken,
-        .partialResultToken = request.partialResultToken,
-    });
-}
-
-fn hoverHandler(server: *Server, arena: std.mem.Allocator, request: types.Hover.Params) Error!?types.Hover {
-    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidParams,
-    };
-    const handle = server.document_store.getHandle(document_uri) orelse return null;
-    if (handle.tree.mode == .zon) return null;
-    const source_index = offsets.positionToIndex(handle.tree.source, request.position, server.offset_encoding);
-
-    const markup_kind: types.MarkupKind = if (server.client_capabilities.hover_supports_md) .markdown else .plaintext;
-
-    var analyser = server.initAnalyser(arena, handle);
-    defer analyser.deinit();
-
-    return hover_handler.hover(
-        &analyser,
-        arena,
-        handle,
-        source_index,
-        markup_kind,
-        server.offset_encoding,
-    );
-}
-
-fn documentSymbolsHandler(server: *Server, arena: std.mem.Allocator, request: types.DocumentSymbol.Params) Error!lsp.ResultType("textDocument/documentSymbol") {
-    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidParams,
-    };
-    const handle = server.document_store.getHandle(document_uri) orelse return null;
-    if (handle.tree.mode == .zon) return null;
-    return .{
-        .document_symbols = try document_symbol.getDocumentSymbols(arena, &handle.tree, server.offset_encoding),
-    };
-}
-
 fn formattingHandler(server: *Server, arena: std.mem.Allocator, request: types.document_formatting.Params) Error!?[]types.TextEdit {
     const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -1453,132 +1256,6 @@ fn formattingHandler(server: *Server, arena: std.mem.Allocator, request: types.d
     return text_edits.items;
 }
 
-fn renameHandler(server: *Server, arena: std.mem.Allocator, request: types.rename.Params) Error!?types.WorkspaceEdit {
-    const response = try references.referencesHandler(server, arena, .{ .rename = request });
-    return if (response) |rep| rep.rename else null;
-}
-
-fn prepareRenameHandler(server: *Server, arena: std.mem.Allocator, request: types.prepare_rename.Params) Error!?types.prepare_rename.Result {
-    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidParams,
-    };
-    const handle = server.document_store.getHandle(document_uri) orelse return null;
-    const source_index = offsets.positionToIndex(handle.tree.source, request.position, server.offset_encoding);
-    const name_loc = offsets.identifierLocFromIndex(&handle.tree, source_index) orelse return null;
-    const name = offsets.locToSlice(handle.tree.source, name_loc);
-    return .{
-        .prepare_rename_placeholder = .{
-            .range = offsets.locToRange(handle.tree.source, name_loc, server.offset_encoding),
-            .placeholder = name,
-        },
-    };
-}
-
-fn referencesHandler(server: *Server, arena: std.mem.Allocator, request: types.reference.Params) Error!?[]types.Location {
-    const response = try references.referencesHandler(server, arena, .{ .references = request });
-    return if (response) |rep| rep.references else null;
-}
-
-fn documentHighlightHandler(server: *Server, arena: std.mem.Allocator, request: types.DocumentHighlight.Params) Error!?[]types.DocumentHighlight {
-    const response = try references.referencesHandler(server, arena, .{ .highlight = request });
-    return if (response) |rep| rep.highlight else null;
-}
-
-fn inlayHintHandler(server: *Server, arena: std.mem.Allocator, request: types.InlayHint.Params) Error!?[]types.InlayHint {
-    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidParams,
-    };
-    const handle = server.document_store.getHandle(document_uri) orelse return null;
-    if (handle.tree.mode == .zon) return null;
-
-    // The Language Server Specification does not provide a client capabilities that allows the client to specify the MarkupKind of inlay hints.
-    const hover_kind: types.MarkupKind = if (server.client_capabilities.hover_supports_md) .markdown else .plaintext;
-    const loc = offsets.rangeToLoc(handle.tree.source, request.range, server.offset_encoding);
-
-    var analyser = server.initAnalyser(arena, handle);
-    defer analyser.deinit();
-
-    return try inlay_hints.writeRangeInlayHint(
-        arena,
-        &server.config_manager.config,
-        &analyser,
-        handle,
-        loc,
-        hover_kind,
-        server.offset_encoding,
-    );
-}
-
-fn codeActionHandler(server: *Server, arena: std.mem.Allocator, request: types.CodeAction.Params) Error!?[]const lsp.types.CodeAction.Result {
-    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidParams,
-    };
-    const handle = server.document_store.getHandle(document_uri) orelse return null;
-
-    // as of right now, only ast-check errors may get a code action
-    if (handle.tree.errors.len != 0) return null;
-    if (handle.tree.mode == .zon) return null;
-
-    var error_bundle = try diagnostics_gen.getAstCheckDiagnostics(server, handle);
-    defer error_bundle.deinit(server.allocator);
-
-    var analyser = server.initAnalyser(arena, handle);
-    defer analyser.deinit();
-
-    const only_kinds = if (request.context.only) |kinds| blk: {
-        var set: std.EnumSet(std.meta.Tag(types.CodeAction.Kind)) = .empty;
-        for (kinds) |kind| {
-            set.setPresent(kind, true);
-        }
-        break :blk set;
-    } else null;
-
-    var builder: code_actions.Builder = .{
-        .arena = arena,
-        .analyser = &analyser,
-        .handle = handle,
-        .offset_encoding = server.offset_encoding,
-        .only_kinds = only_kinds,
-    };
-
-    try builder.generateCodeAction(error_bundle);
-    try builder.generateCodeActionsInRange(request.range);
-
-    const result = try arena.alloc(types.CodeAction.Result, builder.actions.items.len);
-    for (builder.actions.items, result) |action, *out| {
-        out.* = .{ .code_action = action };
-    }
-
-    return result;
-}
-
-fn foldingRangeHandler(server: *Server, arena: std.mem.Allocator, request: types.FoldingRange.Params) Error!?[]types.FoldingRange {
-    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidParams,
-    };
-    const handle = server.document_store.getHandle(document_uri) orelse return null;
-
-    return try folding_range.generateFoldingRanges(arena, &handle.tree, server.offset_encoding);
-}
-
-fn selectionRangeHandler(server: *Server, arena: std.mem.Allocator, request: types.SelectionRange.Params) Error!?[]types.SelectionRange {
-    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidParams,
-    };
-    const handle = server.document_store.getHandle(document_uri) orelse return null;
-
-    return try selection_range.generateSelectionRanges(arena, handle, request.positions, server.offset_encoding);
-}
-
-fn workspaceSymbolHandler(server: *Server, arena: std.mem.Allocator, request: types.workspace.Symbol.Params) Error!?types.workspace.Symbol.Result {
-    return try @import("features/workspace_symbols.zig").handler(server, arena, request);
-}
-
 const HandledRequestParams = union(enum) {
     initialize: types.InitializeParams,
     shutdown,
@@ -1590,7 +1267,6 @@ const HandledRequestParams = union(enum) {
     @"textDocument/signatureHelp": types.SignatureHelp.Params,
     @"textDocument/definition": types.Definition.Params,
     @"textDocument/typeDefinition": types.type_definition.Params,
-    @"textDocument/implementation": types.implementation.Params,
     @"textDocument/declaration": types.declaration.Params,
     @"textDocument/hover": types.Hover.Params,
     @"textDocument/documentSymbol": types.DocumentSymbol.Params,
@@ -1635,7 +1311,6 @@ fn isBlockingMessage(msg: Message) bool {
             .@"textDocument/signatureHelp",
             .@"textDocument/definition",
             .@"textDocument/typeDefinition",
-            .@"textDocument/implementation",
             .@"textDocument/declaration",
             .@"textDocument/hover",
             .@"textDocument/documentSymbol",
@@ -1698,7 +1373,13 @@ pub fn create(options: CreateOptions) std.mem.Allocator.Error!*Server {
             .config = undefined, // set below
             .diagnostics_collection = &server.diagnostics_collection,
         },
-        .diagnostics_collection = .{ .io = io, .allocator = allocator },
+        .transport = null, // set below
+        .diagnostics_collection = .{
+            .io = io,
+            .allocator = allocator,
+            .transport = null, // set below
+        },
+        .ip = undefined, // set below
     };
     server.document_store.config = createDocumentStoreConfig(server.config_manager);
     server.diagnostics_collection.setPromoteReferenceTraces(server.config_manager.config.promote_reference_traces);
@@ -1799,26 +1480,25 @@ pub fn sendRequestSync(server: *Server, arena: std.mem.Allocator, comptime metho
         .initialize => try server.initializeHandler(arena, params),
         .shutdown => try server.shutdownHandler(arena, params),
         .@"textDocument/willSaveWaitUntil" => try server.willSaveWaitUntilHandler(arena, params),
-        .@"textDocument/semanticTokens/full" => try server.semanticTokensFullHandler(arena, params),
-        .@"textDocument/semanticTokens/range" => try server.semanticTokensRangeHandler(arena, params),
-        .@"textDocument/inlayHint" => try server.inlayHintHandler(arena, params),
-        .@"textDocument/completion" => try server.completionHandler(arena, params),
-        .@"textDocument/signatureHelp" => try server.signatureHelpHandler(arena, params),
-        .@"textDocument/definition" => try server.gotoDefinitionHandler(arena, params),
-        .@"textDocument/typeDefinition" => try server.gotoTypeDefinitionHandler(arena, params),
-        .@"textDocument/implementation" => try server.gotoImplementationHandler(arena, params),
-        .@"textDocument/declaration" => try server.gotoDeclarationHandler(arena, params),
-        .@"textDocument/hover" => try server.hoverHandler(arena, params),
-        .@"textDocument/documentSymbol" => try server.documentSymbolsHandler(arena, params),
+        .@"textDocument/semanticTokens/full" => try @import("features/semantic_tokens.zig").@"textDocument/semanticTokens/full"(server, arena, params),
+        .@"textDocument/semanticTokens/range" => try @import("features/semantic_tokens.zig").@"textDocument/semanticTokens/range"(server, arena, params),
+        .@"textDocument/inlayHint" => try @import("features/inlay_hints.zig").@"textDocument/inlayHint"(server, arena, params),
+        .@"textDocument/completion" => try @import("features/completions.zig").@"textDocument/completion"(server, arena, params),
+        .@"textDocument/signatureHelp" => try @import("features/signature_help.zig").@"textDocument/signatureHelp"(server, arena, params),
+        .@"textDocument/definition" => try @import("features/goto.zig").@"textDocument/definition"(server, arena, params),
+        .@"textDocument/typeDefinition" => try @import("features/goto.zig").@"textDocument/typeDefinition"(server, arena, params),
+        .@"textDocument/declaration" => try @import("features/goto.zig").@"textDocument/declaration"(server, arena, params),
+        .@"textDocument/hover" => try @import("features/hover.zig").@"textDocument/hover"(server, arena, params),
+        .@"textDocument/documentSymbol" => try @import("features/document_symbol.zig").@"textDocument/documentSymbol"(server, arena, params),
         .@"textDocument/formatting" => try server.formattingHandler(arena, params),
-        .@"textDocument/rename" => try server.renameHandler(arena, params),
-        .@"textDocument/prepareRename" => try server.prepareRenameHandler(arena, params),
-        .@"textDocument/references" => try server.referencesHandler(arena, params),
-        .@"textDocument/documentHighlight" => try server.documentHighlightHandler(arena, params),
-        .@"textDocument/codeAction" => try server.codeActionHandler(arena, params),
-        .@"textDocument/foldingRange" => try server.foldingRangeHandler(arena, params),
-        .@"textDocument/selectionRange" => try server.selectionRangeHandler(arena, params),
-        .@"workspace/symbol" => try server.workspaceSymbolHandler(arena, params),
+        .@"textDocument/rename" => try @import("features/references.zig").@"textDocument/rename"(server, arena, params),
+        .@"textDocument/prepareRename" => try @import("features/references.zig").@"textDocument/prepareRename"(server, arena, params),
+        .@"textDocument/references" => try @import("features/references.zig").@"textDocument/references"(server, arena, params),
+        .@"textDocument/documentHighlight" => try @import("features/references.zig").@"textDocument/documentHighlight"(server, arena, params),
+        .@"textDocument/codeAction" => try @import("features/code_actions.zig").@"textDocument/codeAction"(server, arena, params),
+        .@"textDocument/foldingRange" => try @import("features/folding_range.zig").@"textDocument/foldingRange"(server, arena, params),
+        .@"textDocument/selectionRange" => try @import("features/selection_range.zig").@"textDocument/selectionRange"(server, arena, params),
+        .@"workspace/symbol" => try @import("features/workspace_symbols.zig").@"workspace/symbol"(server, arena, params),
         .other => return null,
     };
 }
@@ -1895,19 +1575,19 @@ fn processMessageReportError(server: *Server, arena_state: std.heap.ArenaAllocat
         switch (message) {
             .request => |request| {
                 const json_message = server.sendToClientResponseError(request.id, .{
-                    .code = @enumFromInt(switch (err) {
+                    .code = @fromBackingInt(switch (err) {
                         error.Canceled => unreachable, // checked above
-                        error.OutOfMemory => @intFromEnum(types.ErrorCodes.InternalError),
-                        error.ParseError => @intFromEnum(types.ErrorCodes.ParseError),
-                        error.InvalidRequest => @intFromEnum(types.ErrorCodes.InvalidRequest),
-                        error.MethodNotFound => @intFromEnum(types.ErrorCodes.MethodNotFound),
-                        error.InvalidParams => @intFromEnum(types.ErrorCodes.InvalidParams),
-                        error.InternalError => @intFromEnum(types.ErrorCodes.InternalError),
-                        error.ServerNotInitialized => @intFromEnum(types.ErrorCodes.ServerNotInitialized),
-                        error.RequestFailed => @intFromEnum(types.LSPErrorCodes.RequestFailed),
-                        error.ServerCancelled => @intFromEnum(types.LSPErrorCodes.ServerCancelled),
-                        error.ContentModified => @intFromEnum(types.LSPErrorCodes.ContentModified),
-                        error.RequestCancelled => @intFromEnum(types.LSPErrorCodes.RequestCancelled),
+                        error.OutOfMemory => @backingInt(types.ErrorCodes.InternalError),
+                        error.ParseError => @backingInt(types.ErrorCodes.ParseError),
+                        error.InvalidRequest => @backingInt(types.ErrorCodes.InvalidRequest),
+                        error.MethodNotFound => @backingInt(types.ErrorCodes.MethodNotFound),
+                        error.InvalidParams => @backingInt(types.ErrorCodes.InvalidParams),
+                        error.InternalError => @backingInt(types.ErrorCodes.InternalError),
+                        error.ServerNotInitialized => @backingInt(types.ErrorCodes.ServerNotInitialized),
+                        error.RequestFailed => @backingInt(types.LSPErrorCodes.RequestFailed),
+                        error.ServerCancelled => @backingInt(types.LSPErrorCodes.ServerCancelled),
+                        error.ContentModified => @backingInt(types.LSPErrorCodes.ContentModified),
+                        error.RequestCancelled => @backingInt(types.LSPErrorCodes.RequestCancelled),
                     }),
                     .message = @errorName(err),
                 }) catch |send_err| switch (send_err) {

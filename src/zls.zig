@@ -32,11 +32,9 @@ pub const references = @import("features/references.zig");
 pub const selection_range = @import("features/selection_range.zig");
 pub const semantic_tokens = @import("features/semantic_tokens.zig");
 pub const signature_help = @import("features/signature_help.zig");
+pub const workspace_symbols = @import("features/workspace_symbols.zig");
 
 comptime {
     const std = @import("std");
     std.testing.refAllDecls(@This());
-
-    std.testing.refAllDecls(@import("build_runner/check.zig"));
-    std.testing.refAllDecls(@import("build_runner/shared.zig"));
 }

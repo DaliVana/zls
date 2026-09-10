@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const Ast = std.zig.Ast;
-const log = std.log.scoped(.inlay_hint);
 
 const DocumentStore = @import("../DocumentStore.zig");
 const Analyser = @import("../analysis.zig");
@@ -11,8 +10,12 @@ const offsets = @import("../offsets.zig");
 const tracy = @import("tracy");
 const ast = @import("../ast.zig");
 const Config = @import("../Config.zig");
+const Server = @import("../Server.zig");
+const Uri = @import("../Uri.zig");
 
 const data = @import("version_data");
+
+pub const Error = Analyser.Error || error{InvalidParams};
 
 /// don't show inlay hints for builtin functions whose parameter names carry no
 /// meaningful information or are trivial deductible based on the builtin name.
@@ -49,6 +52,7 @@ const excluded_builtins_set: std.EnumArray(std.zig.BuiltinFn.Tag, bool) = .init(
     .c_va_copy = false,
     .c_va_end = false,
     .c_va_start = false,
+    .div_ceil = true,
     .div_exact = true,
     .div_floor = true,
     .div_trunc = true,
@@ -73,6 +77,8 @@ const excluded_builtins_set: std.EnumArray(std.zig.BuiltinFn.Tag, bool) = .init(
     .import = true,
     .in_comptime = true, // no parameters
     .int_cast = true,
+    .backing_int = true,
+    .from_backing_int = true,
     .enum_from_int = true,
     .error_from_int = true,
     .float_from_int = true,
@@ -132,6 +138,7 @@ const excluded_builtins_set: std.EnumArray(std.zig.BuiltinFn.Tag, bool) = .init(
     .Struct = false,
     .Union = false,
     .Enum = false,
+    .SpirvType = true,
     .type_info = true,
     .type_name = true,
     .TypeOf = true, // variadic
@@ -143,16 +150,45 @@ const excluded_builtins_set: std.EnumArray(std.zig.BuiltinFn.Tag, bool) = .init(
     .work_group_id = false,
 });
 
-pub const InlayHint = struct {
-    index: usize,
-    label: []const u8,
-    kind: types.InlayHint.Kind,
-    tooltip: ?types.MarkupContent,
+pub fn @"textDocument/inlayHint"(
+    server: *Server,
+    arena: std.mem.Allocator,
+    request: types.InlayHint.Params,
+) Error!?[]types.InlayHint {
+    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidParams,
+    };
+    const handle = server.document_store.getHandle(document_uri) orelse return null;
+    if (handle.tree.mode == .zon) return null;
 
-    fn lessThan(_: void, lhs: InlayHint, rhs: InlayHint) bool {
-        return lhs.index < rhs.index;
+    var analyser = server.initAnalyser(arena, handle);
+    defer analyser.deinit();
+    analyser.resolve_number_literal_values = true;
+
+    var builder: Builder = .{
+        .arena = arena,
+        .analyser = &analyser,
+        .config = &server.config_manager.config,
+        .handle = handle,
+        // The Language Server Specification does not provide a client capabilities that allows the client to specify the MarkupKind of inlay hints.
+        .hover_kind = if (server.client_capabilities.hover_supports_md) .markdown else .plaintext,
+    };
+
+    const loc = offsets.rangeToLoc(handle.tree.source, request.range, server.offset_encoding);
+
+    var walker: ast.Walker = try .init(arena, &handle.tree, .root);
+    defer walker.deinit(arena);
+    while (try walker.nextIgnoreClose(arena, &handle.tree)) |node| {
+        if (offsets.locIntersect(loc, offsets.nodeToLoc(&handle.tree, node))) {
+            try writeNodeInlayHint(&builder, &handle.tree, node);
+        } else {
+            walker.skip();
+        }
     }
-};
+
+    return try builder.getInlayHints(server.offset_encoding);
+}
 
 const Builder = struct {
     arena: std.mem.Allocator,
@@ -161,6 +197,17 @@ const Builder = struct {
     handle: *DocumentStore.Handle,
     hints: std.ArrayList(InlayHint) = .empty,
     hover_kind: types.MarkupKind,
+
+    const InlayHint = struct {
+        index: usize,
+        label: []const u8,
+        kind: types.InlayHint.Kind,
+        tooltip: ?types.MarkupContent,
+
+        fn lessThan(_: void, lhs: InlayHint, rhs: InlayHint) bool {
+            return lhs.index < rhs.index;
+        }
+    };
 
     fn appendParameterHint(
         self: *Builder,
@@ -400,9 +447,7 @@ fn writeCallNodeHint(builder: *Builder, call: Ast.full.Call) Analyser.Error!void
 
     switch (tree.nodeTag(call.ast.fn_expr)) {
         .identifier, .field_access, .enum_literal => try writeCallHint(builder, call),
-        else => {
-            log.debug("cannot deduce fn expression with tag '{}'", .{tree.nodeTag(call.ast.fn_expr)});
-        },
+        else => {},
     }
 }
 
@@ -539,41 +584,4 @@ fn writeNodeInlayHint(
         },
         else => {},
     }
-}
-
-/// creates a list of `InlayHint`'s from the given document
-/// only parameter hints are created
-/// only hints in the given loc are created
-pub fn writeRangeInlayHint(
-    arena: std.mem.Allocator,
-    config: *const Config,
-    analyser: *Analyser,
-    handle: *DocumentStore.Handle,
-    loc: offsets.Loc,
-    hover_kind: types.MarkupKind,
-    offset_encoding: offsets.Encoding,
-) Analyser.Error![]types.InlayHint {
-    const old_resolve_number_literal_values = analyser.resolve_number_literal_values;
-    analyser.resolve_number_literal_values = true;
-    defer analyser.resolve_number_literal_values = old_resolve_number_literal_values;
-
-    var builder: Builder = .{
-        .arena = arena,
-        .analyser = analyser,
-        .config = config,
-        .handle = handle,
-        .hover_kind = hover_kind,
-    };
-
-    var walker: ast.Walker = try .init(arena, &handle.tree, .root);
-    defer walker.deinit(arena);
-    while (try walker.nextIgnoreClose(arena, &handle.tree)) |node| {
-        if (offsets.locIntersect(loc, offsets.nodeToLoc(&handle.tree, node))) {
-            try writeNodeInlayHint(&builder, &handle.tree, node);
-        } else {
-            walker.skip();
-        }
-    }
-
-    return try builder.getInlayHints(offset_encoding);
 }

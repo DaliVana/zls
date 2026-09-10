@@ -558,7 +558,7 @@ fn convertErrorBundleToLSPDiangostics(
             .range = src_range,
             .severity = .Error,
             .source = "zls",
-            .message = message,
+            .message = .{ .string = message },
             .tags = if (tags.items.len != 0) tags.items else null,
             .relatedInformation = if (related_information.items.len != 0) related_information.items else null,
         });
@@ -671,7 +671,7 @@ test DiagnosticsCollection {
 
         try std.testing.expectEqual(1, diagnostics.items.len);
         try std.testing.expectEqual(lsp.types.Diagnostic.Severity.Error, diagnostics.items[0].severity);
-        try std.testing.expectEqualStrings("Living For The City", diagnostics.items[0].message);
+        try std.testing.expectEqualStrings("Living For The City", diagnostics.items[0].message.string);
         try std.testing.expectEqual(null, diagnostics.items[0].relatedInformation);
     }
 
@@ -682,7 +682,7 @@ test DiagnosticsCollection {
         try collection.collectLspDiagnosticsForDocument(uri, .@"utf-8", arena, &diagnostics);
 
         try std.testing.expectEqual(1, diagnostics.items.len);
-        try std.testing.expectEqualStrings("Living For The City", diagnostics.items[0].message);
+        try std.testing.expectEqualStrings("Living For The City", diagnostics.items[0].message.string);
     }
 
     {
@@ -692,7 +692,7 @@ test DiagnosticsCollection {
         try collection.collectLspDiagnosticsForDocument(uri, .@"utf-8", arena, &diagnostics);
 
         try std.testing.expectEqual(1, diagnostics.items.len);
-        try std.testing.expectEqualStrings("You Haven't Done Nothin'", diagnostics.items[0].message);
+        try std.testing.expectEqualStrings("You Haven't Done Nothin'", diagnostics.items[0].message.string);
     }
 
     {
@@ -705,15 +705,15 @@ test DiagnosticsCollection {
     }
 
     {
-        try collection.pushErrorBundle(@enumFromInt(16), 4, null, eb2);
-        try collection.pushErrorBundle(@enumFromInt(17), 4, null, eb3);
+        try collection.pushErrorBundle(@fromBackingInt(16), 4, null, eb2);
+        try collection.pushErrorBundle(@fromBackingInt(17), 4, null, eb3);
 
         var diagnostics: std.ArrayList(lsp.types.Diagnostic) = .empty;
         try collection.collectLspDiagnosticsForDocument(uri, .@"utf-8", arena, &diagnostics);
 
         try std.testing.expectEqual(2, diagnostics.items.len);
-        try std.testing.expectEqualStrings("You Haven't Done Nothin'", diagnostics.items[0].message);
-        try std.testing.expectEqualStrings("As", diagnostics.items[1].message);
+        try std.testing.expectEqualStrings("You Haven't Done Nothin'", diagnostics.items[0].message.string);
+        try std.testing.expectEqualStrings("As", diagnostics.items[1].message.string);
     }
 }
 
@@ -750,7 +750,7 @@ test "DiagnosticsCollection - compile_log_text" {
         \\Compile Log Output:
         \\@as(comptime_int, 7)
         \\@as(comptime_int, 13)
-    , diagnostics.items[0].message);
+    , diagnostics.items[0].message.string);
     try std.testing.expectEqual(null, diagnostics.items[0].relatedInformation);
 }
 

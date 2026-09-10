@@ -11,7 +11,65 @@ const ast = @import("../ast.zig");
 const diff = @import("../diff.zig");
 const types = @import("lsp").types;
 const offsets = @import("../offsets.zig");
+const Server = @import("../Server.zig");
+const Uri = @import("../Uri.zig");
+const diagnostics_gen = @import("diagnostics.zig");
 const tracy = @import("tracy");
+
+/// To report server capabilities
+pub const supported_code_actions: []const types.CodeAction.Kind = &.{
+    .quickfix,
+    .refactor,
+    .source,
+    .@"source.organizeImports",
+    .@"source.fixAll",
+};
+
+pub const Error = Analyser.Error || error{InvalidParams};
+
+pub fn @"textDocument/codeAction"(server: *Server, arena: std.mem.Allocator, request: types.CodeAction.Params) Error!?[]const types.CodeAction.Result {
+    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidParams,
+    };
+    const handle = server.document_store.getHandle(document_uri) orelse return null;
+
+    // as of right now, only ast-check errors may get a code action
+    if (handle.tree.errors.len != 0) return null;
+    if (handle.tree.mode == .zon) return null;
+
+    var error_bundle = try diagnostics_gen.getAstCheckDiagnostics(server, handle);
+    defer error_bundle.deinit(server.allocator);
+
+    var analyser = server.initAnalyser(arena, handle);
+    defer analyser.deinit();
+
+    const only_kinds = if (request.context.only) |kinds| blk: {
+        var set: std.EnumSet(std.meta.Tag(types.CodeAction.Kind)) = .empty;
+        for (kinds) |kind| {
+            set.setPresent(kind, true);
+        }
+        break :blk set;
+    } else null;
+
+    var builder: Builder = .{
+        .arena = arena,
+        .analyser = &analyser,
+        .handle = handle,
+        .offset_encoding = server.offset_encoding,
+        .only_kinds = only_kinds,
+    };
+
+    try builder.generateCodeAction(error_bundle);
+    try builder.generateCodeActionsInRange(request.range);
+
+    const result = try arena.alloc(types.CodeAction.Result, builder.actions.items.len);
+    for (builder.actions.items, result) |action, *out| {
+        out.* = .{ .code_action = action };
+    }
+
+    return result;
+}
 
 pub const Builder = struct {
     arena: std.mem.Allocator,
@@ -129,7 +187,7 @@ pub const Builder = struct {
     }
 };
 
-pub fn generateStringLiteralCodeActions(
+fn generateStringLiteralCodeActions(
     builder: *Builder,
     token: Ast.TokenIndex,
 ) error{OutOfMemory}!void {
@@ -172,7 +230,7 @@ pub fn generateStringLiteralCodeActions(
     });
 }
 
-pub fn generateMultilineStringCodeActions(
+fn generateMultilineStringCodeActions(
     builder: *Builder,
     token: Ast.TokenIndex,
 ) error{OutOfMemory}!void {
@@ -230,15 +288,6 @@ pub fn generateMultilineStringCodeActions(
     });
 }
 
-/// To report server capabilities
-pub const supported_code_actions: []const types.CodeAction.Kind = &.{
-    .quickfix,
-    .refactor,
-    .source,
-    .@"source.organizeImports",
-    .@"source.fixAll",
-};
-
 pub fn collectAutoDiscardDiagnostics(
     analyser: *Analyser,
     handle: *DocumentStore.Handle,
@@ -280,8 +329,7 @@ pub fn collectAutoDiscardDiagnostics(
                 offsets.tokenToSlice(tree, identifier_token),
                 tree.tokenStart(identifier_token),
             )) orelse break :blk &.{};
-            const def = try decl.definitionToken(analyser, false);
-            const range = offsets.tokenToRange(tree, def.token, offset_encoding);
+            const range = offsets.tokenToRange(tree, decl.nameToken(), offset_encoding);
             break :blk try arena.dupe(types.Diagnostic.RelatedInformation, &.{.{
                 .location = .{
                     .uri = handle.uri.raw,
@@ -296,7 +344,7 @@ pub fn collectAutoDiscardDiagnostics(
             .severity = .Information,
             .code = null,
             .source = "zls",
-            .message = "auto discard for unused variable",
+            .message = .{ .string = "auto discard for unused variable" },
             .relatedInformation = related_info,
         });
     }
@@ -697,7 +745,7 @@ fn handleUnorganizedImport(builder: *Builder) error{OutOfMemory}!void {
 }
 
 /// const name_slice = @import(value_slice);
-pub const ImportDecl = struct {
+const ImportDecl = struct {
     var_decl: Ast.Node.Index,
     first_comment_token: ?Ast.TokenIndex,
     name: []const u8,
@@ -736,7 +784,7 @@ pub const ImportDecl = struct {
     pub fn lessThan(context: *const Ast, lhs: ImportDecl, rhs: ImportDecl) bool {
         const lhs_kind = lhs.getKind();
         const rhs_kind = rhs.getKind();
-        if (lhs_kind != rhs_kind) return @intFromEnum(lhs_kind) < @intFromEnum(rhs_kind);
+        if (lhs_kind != rhs_kind) return @backingInt(lhs_kind) < @backingInt(rhs_kind);
 
         if (sort_public_decls_first) {
             const node_tokens = context.nodes.items(.main_token);
@@ -801,9 +849,9 @@ pub const ImportDecl = struct {
     /// returns true if there should be an empty line between these two imports
     /// assumes `lessThan(void, lhs, rhs) == true`
     pub fn addSeperator(lhs: ImportDecl, rhs: ImportDecl) bool {
-        const lhs_kind = @intFromEnum(lhs.getKind());
-        const rhs_kind = @intFromEnum(rhs.getKind());
-        if (rhs_kind <= @intFromEnum(Kind.build_options)) return false;
+        const lhs_kind = @backingInt(lhs.getKind());
+        const rhs_kind = @backingInt(rhs.getKind());
+        if (rhs_kind <= @backingInt(Kind.build_options)) return false;
         return lhs_kind != rhs_kind;
     }
 
@@ -831,7 +879,7 @@ pub const ImportDecl = struct {
     }
 };
 
-pub fn getImportsDecls(builder: *Builder, allocator: std.mem.Allocator) error{OutOfMemory}![]ImportDecl {
+fn getImportsDecls(builder: *Builder, allocator: std.mem.Allocator) error{OutOfMemory}![]ImportDecl {
     const tree = &builder.handle.tree;
 
     const root_decls = tree.rootDecls();
@@ -903,7 +951,7 @@ pub fn getImportsDecls(builder: *Builder, allocator: std.mem.Allocator) error{Ou
                             .kind = .other,
                         }).unwrap() orelse continue :next_decl;
 
-                        const decl = document_scope.declarations.get(@intFromEnum(decl_index));
+                        const decl = document_scope.declarations.get(@backingInt(decl_index));
 
                         if (decl != .ast_node) continue :next_decl;
                         const decl_found = decl.ast_node;
@@ -1133,10 +1181,9 @@ const DiagnosticKind = union(enum) {
     }
 
     fn parseEnum(comptime T: type, message: []const u8) ?T {
-        inline for (std.meta.fields(T)) |field| {
-            if (std.mem.startsWith(u8, message, field.name)) {
-                // is there a better way to achieve this?
-                return @as(T, @enumFromInt(field.value));
+        inline for (comptime std.meta.fieldNames(T)) |field_name| {
+            if (std.mem.startsWith(u8, message, field_name)) {
+                return @field(T, field_name);
             }
         }
 

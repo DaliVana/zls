@@ -2,8 +2,7 @@
 
 const std = @import("std");
 
-const lsp = @import("lsp");
-const types = lsp.types;
+const types = @import("lsp").types;
 
 const DocumentStore = @import("../DocumentStore.zig");
 const offsets = @import("../offsets.zig");
@@ -11,7 +10,13 @@ const Server = @import("../Server.zig");
 const TrigramStore = @import("../TrigramStore.zig");
 const Uri = @import("../Uri.zig");
 
-pub fn handler(server: *Server, arena: std.mem.Allocator, request: types.workspace.Symbol.Params) error{ OutOfMemory, Canceled }!?types.workspace.Symbol.Result {
+pub const Error = error{ OutOfMemory, Canceled };
+
+pub fn @"workspace/symbol"(
+    server: *Server,
+    arena: std.mem.Allocator,
+    request: types.workspace.Symbol.Params,
+) Error!?types.workspace.Symbol.Result {
     if (request.query.len == 0) return null;
 
     var workspace_uris: std.ArrayList(std.Uri) = try .initCapacity(arena, server.workspaces.items.len);
@@ -36,7 +41,7 @@ pub fn handler(server: *Server, arena: std.mem.Allocator, request: types.workspa
         const SortContext = struct {
             names: []const std.zig.Ast.TokenIndex,
             fn lessThan(ctx: @This(), lhs: TrigramStore.Declaration.Index, rhs: TrigramStore.Declaration.Index) bool {
-                return ctx.names[@intFromEnum(lhs)] < ctx.names[@intFromEnum(rhs)];
+                return ctx.names[@backingInt(lhs)] < ctx.names[@backingInt(rhs)];
             }
         };
 
@@ -56,8 +61,8 @@ pub fn handler(server: *Server, arena: std.mem.Allocator, request: types.workspa
 
         try symbols.ensureUnusedCapacity(arena, declaration_buffer.items.len);
         for (declaration_buffer.items) |declaration| {
-            const name_token = names[@intFromEnum(declaration)];
-            const kind = kinds[@intFromEnum(declaration)];
+            const name_token = names[@backingInt(declaration)];
+            const kind = kinds[@backingInt(declaration)];
 
             const loc = offsets.tokenToLoc(&handle.tree, name_token);
             const name = @import("document_symbol.zig").tokenNameMaybeQuotes(&handle.tree, name_token);
