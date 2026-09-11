@@ -1,4 +1,4 @@
-//! A per-file trigram store for workspace symbols.
+//! A queryable per-file set of workspace symbols.
 
 const std = @import("std");
 const ast = @import("ast.zig");

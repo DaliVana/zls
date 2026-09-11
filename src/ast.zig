@@ -1,6 +1,11 @@
-//! Collection of functions from std.zig.ast that we need
-//! and may hit undefined in the standard library implementation
-//! when there are parser errors.
+//! Helper functions for standard library Zig abstract syntax tree (`std.zig.Ast`)
+//!
+//! See `./print_ast.zig` to view a human-readable representation of the AST
+//! when debugging.
+//!
+//! Do not use any function in `std.zig.Ast` that has an equilvalent function
+//! defined here. The standard library are not meant to be used when the AST
+//! has syntax errors.
 
 const std = @import("std");
 const offsets = @import("offsets.zig");
