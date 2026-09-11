@@ -1,3 +1,5 @@
+//! A normalized Uri
+
 const std = @import("std");
 const builtin = @import("builtin");
 
