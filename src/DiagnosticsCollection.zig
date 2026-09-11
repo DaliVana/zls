@@ -1,3 +1,5 @@
+//! Collects various sources of error messages to be sent out as LSP diagnostics.
+
 const std = @import("std");
 const lsp = @import("lsp");
 const tracy = @import("tracy");

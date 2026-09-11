@@ -1,4 +1,8 @@
 //! Render a human-readable representation of the Zig abstract syntax tree (AST).
+//!
+//! This file can be used in two ways:
+//!   - through the ZLS module with `zls.testing.print_ast`
+//!   - a standalone executable: `zig run src/print_ast.zig -- ./my_source.zig`
 
 const std = @import("std");
 const Ast = std.zig.Ast;
